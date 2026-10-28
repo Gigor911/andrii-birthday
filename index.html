@@ -1664,6 +1664,33 @@ function hangingCapsule(radius, length) {
 }
 
 /**
+ * Builds a smooth limb or trunk by spinning a radius profile round the y axis, with rounded ends.
+ * @param {Array<Array<number>>} rings [y, radius] pairs, in any order.
+ * @param {number} [segments] Radial segments.
+ * @param {number} [capHeight] Height of each rounded end as a fraction of its radius.
+ * @returns {THREE.LatheGeometry} Closed lathe geometry.
+ */
+function profileGeometry(rings, segments = 18, capHeight = 0.6) {
+  const sorted = [...rings].sort((a, b) => a[0] - b[0]);
+  const [bottomY, bottomRadius] = sorted[0];
+  const [topY, topRadius] = sorted[sorted.length - 1];
+  const capSteps = 4;
+  const points = [];
+  for (let step = 0; step < capSteps; step += 1) {
+    const angle = (step / capSteps) * (Math.PI / 2);
+    points.push(new THREE.Vector2(bottomRadius * Math.sin(angle), bottomY - bottomRadius * capHeight * Math.cos(angle)));
+  }
+  for (const [y, radius] of sorted) {
+    points.push(new THREE.Vector2(radius, y));
+  }
+  for (let step = capSteps - 1; step >= 0; step -= 1) {
+    const angle = (step / capSteps) * (Math.PI / 2);
+    points.push(new THREE.Vector2(topRadius * Math.sin(angle), topY + topRadius * capHeight * Math.cos(angle)));
+  }
+  return new THREE.LatheGeometry(points, segments);
+}
+
+/**
  * Builds the D-shaped flat brim of the snapback.
  * @returns {THREE.ExtrudeGeometry} Brim lying in the x/z plane, forward is +z.
  */
@@ -1700,19 +1727,23 @@ function createBrimGeometry() {
 }
 
 /**
- * Builds a photo face mask for a head: a curved patch that wraps the front of the head,
- * with the face photo projected straight on and faded out at an oval edge.
+ * Builds a flat photo face mask for a head: an oval card held in front of the face, the photo cut out
+ * crisply inside a thin paper border, with a thin card edge behind it so it reads as a mask from the side.
  * The photos are aligned so the eyes sit 84 px apart, 100 px from the top of a 256 px square.
  * @param {{src: string, oval: Array<number>}} face Photo path, and the visible oval
  *   [centreX, centreY, radiusX, radiusY] as fractions of the photo, measured from its top left.
- * @returns {THREE.Mesh} Mask mesh in head-bone space.
+ * @param {THREE.ColorRepresentation} backColor Colour of the card's back and edge, the wearer's skin so it blends in from behind.
+ * @returns {THREE.Group} Mask in head-bone space.
  */
-function createFaceMask(face) {
-  const size = 256;
+function createFaceMask(face, backColor) {
+  const size = 512;
   const width = 0.262;
   const top = 0.258;
-  const center = 0.13;
-  const radii = [0.116, 0.14, 0.136];
+  const front = 0.128;
+  const thickness = 0.004;
+  const border = 0.022;
+  const cardColor = '#F6F1E7';
+  const [centerX, centerY, radiusX, radiusY] = face.oval;
   const canvas = document.createElement('canvas');
   canvas.width = size;
   canvas.height = size;
@@ -1721,38 +1752,41 @@ function createFaceMask(face) {
   texture.anisotropy = 4;
   loadImage(face.src, (photo) => {
     const context = canvas.getContext('2d');
+    context.fillStyle = cardColor;
+    context.beginPath();
+    context.ellipse(centerX * size, centerY * size, (radiusX + border) * size, (radiusY + border) * size, 0, 0, Math.PI * 2);
+    context.fill();
+    context.save();
+    context.beginPath();
+    context.ellipse(centerX * size, centerY * size, radiusX * size, radiusY * size, 0, 0, Math.PI * 2);
+    context.clip();
     context.drawImage(photo, 0, 0, size, size);
-    const [centerX, centerY, radiusX, radiusY] = face.oval;
-    context.globalCompositeOperation = 'destination-in';
-    context.translate(centerX * size, centerY * size);
-    context.scale(radiusX * size, radiusY * size);
-    const fade = context.createRadialGradient(0, 0, 0.82, 0, 0, 1);
-    fade.addColorStop(0, '#000');
-    fade.addColorStop(1, 'rgba(0, 0, 0, 0)');
-    context.fillStyle = fade;
-    context.fillRect(-4, -4, 8, 8);
+    context.restore();
     texture.needsUpdate = true;
   });
 
-  const geometry = new THREE.PlaneGeometry(width, width, 24, 24);
-  geometry.translate(0, top - width / 2, 0);
-  const position = geometry.attributes.position;
-  for (let i = 0; i < position.count; i += 1) {
-    const x = position.getX(i) / radii[0];
-    const y = (position.getY(i) - center) / radii[1];
-    position.setZ(i, radii[2] * Math.sqrt(Math.max(0, 1 - x * x - y * y)));
-  }
-  geometry.computeVertexNormals();
-  const material = new THREE.MeshStandardMaterial({
-    map: texture,
-    emissive: '#ffffff',
-    emissiveMap: texture,
-    emissiveIntensity: 0.18,
-    roughness: 0.8,
-    transparent: true,
-  });
-  const mask = new THREE.Mesh(geometry, material);
-  mask.receiveShadow = true;
+  const mask = new THREE.Group();
+  mask.position.set(0, top - width / 2, front);
+  const photoMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(width, width),
+    new THREE.MeshStandardMaterial({
+      map: texture,
+      emissive: '#ffffff',
+      emissiveMap: texture,
+      emissiveIntensity: 0.18,
+      roughness: 0.8,
+      alphaTest: 0.5,
+    }),
+  );
+  photoMesh.receiveShadow = true;
+  const outline = new THREE.Shape();
+  outline.absellipse((centerX - 0.5) * width, (0.5 - centerY) * width, (radiusX + border) * width, (radiusY + border) * width, 0, Math.PI * 2);
+  const cardGeometry = new THREE.ExtrudeGeometry(outline, { depth: thickness, bevelEnabled: false, curveSegments: 48 });
+  cardGeometry.translate(0, 0, -thickness - 0.0005);
+  const card = new THREE.Mesh(cardGeometry, new THREE.MeshStandardMaterial({ color: backColor, roughness: 0.75 }));
+  card.castShadow = true;
+  card.receiveShadow = true;
+  mask.add(photoMesh, card);
   return mask;
 }
 
@@ -2068,32 +2102,41 @@ function createAvatar(look) {
     return mesh;
   }
 
+  const chest = build.torsoTop * (female ? 0.86 : 0.95);
+  const hips = Math.max(build.torsoBottom, build.legX + 0.085 * build.thigh) * (female ? 1.04 : 1);
+  const waist = Math.min(chest, hips) * (female ? 0.86 : 0.88);
+  const covered = look.top.kind !== 'none';
+  const neck = female ? 0.05 : 0.06;
+
   /**
-   * Builds one arm hanging from the shoulder.
+   * Builds one arm hanging from the shoulder: deltoid, tapered upper arm and forearm, and a hand with its palm toward the thigh.
    * @param {number} side +1 for the figure's left (+x), -1 for its right.
    * @returns {{shoulder: THREE.Bone, elbow: THREE.Bone, side: number}} Arm joints.
    */
   function createArm(side) {
     const shoulder = new THREE.Bone();
     shoulder.position.set(side * build.shoulderX, 1.33, 0);
-    addPart(shoulder, unitSphere, paints.top, [0, 0, 0], [0.06 * arm, 0.06 * arm, 0.06 * arm]);
-    if (look.top.kind !== 'none') {
+    addPart(shoulder, unitSphere, paints.top, [side * -0.016, -0.008, 0], [0.062 * arm, 0.058 * arm, 0.06 * arm]);
+    addPart(shoulder, profileGeometry([[0, 0.052 * arm], [-0.1, 0.053 * arm], [-0.2, 0.044 * arm], [-0.29, 0.037 * arm]]), paints.skin, [0, 0, 0]);
+    if (covered) {
       const sleeveLength = look.top.kind === 'shirt' ? 0.3 : 0.17;
-      const sleeve = new THREE.CylinderGeometry(0.06 * arm, 0.054 * arm, sleeveLength, 18);
+      const sleeve = new THREE.CylinderGeometry(0.063 * arm, 0.058 * arm, sleeveLength, 18);
       sleeve.translate(0, -sleeveLength / 2, 0);
       addPart(shoulder, sleeve, paints.top, [0, 0, 0]);
     }
-    addPart(shoulder, hangingCapsule(0.046 * arm, 0.18), paints.skin, [0, -0.04, 0]);
     const elbow = new THREE.Bone();
     elbow.position.set(0, -0.29, 0);
     shoulder.add(elbow);
-    addPart(elbow, hangingCapsule(0.041 * arm, 0.19), paints.skin, [0, 0.02, 0]);
+    addPart(elbow, unitSphere, paints.skin, [0, 0, 0], [0.037 * arm, 0.037 * arm, 0.037 * arm]);
+    addPart(elbow, profileGeometry([[0, 0.038 * arm], [-0.06, 0.042 * arm], [-0.17, 0.032 * arm], [-0.245, 0.026 * arm]]), paints.skin, [0, 0, 0.004]);
     if (look.top.kind === 'shirt') {
-      addPart(elbow, hangingCapsule(0.048 * arm, 0.13), paints.top, [0, 0.03, 0]);
+      addPart(elbow, hangingCapsule(0.047 * arm, 0.13), paints.top, [0, 0.03, 0]);
     }
-    addPart(elbow, unitSphere, paints.skin, [0, -0.29, 0.005], [0.04, 0.055, 0.026]);
+    addPart(elbow, unitSphere, paints.skin, [0, -0.3, 0.004], [0.019, 0.048, 0.041]);
+    addPart(elbow, hangingCapsule(0.016, 0.045), paints.skin, [0, -0.33, 0.006], [1.05, 1, 2.2]);
+    addPart(elbow, hangingCapsule(0.01, 0.03), paints.skin, [side * -0.006, -0.285, 0.036], null, [-0.5, 0, 0]);
     if (look.watch && side > 0) {
-      addPart(elbow, new THREE.CylinderGeometry(0.046 * arm, 0.046 * arm, 0.034, 18), paints.watch, [0, -0.215, 0]);
+      addPart(elbow, new THREE.CylinderGeometry(0.031 * arm, 0.031 * arm, 0.026, 18), paints.watch, [0, -0.225, 0.004]);
     }
     body.add(shoulder);
     return { shoulder, elbow, side };
@@ -2104,38 +2147,52 @@ function createAvatar(look) {
     const leg = new THREE.Bone();
     leg.position.set(side * build.legX, 0.8, 0);
     body.add(leg);
-    addPart(leg, unitSphere, paints.skin, [0, -0.765, 0.04], [0.055, 0.035, 0.115]);
-    addPart(leg, new THREE.CapsuleGeometry(0.056, 0.36, 8, 18), paints.skin, [0, -0.53, 0]);
+    const thigh = build.thigh;
+    addPart(leg, profileGeometry([[0.02, 0.08 * thigh], [-0.1, 0.076 * thigh], [-0.3, 0.06 * thigh], [-0.4, 0.047 * thigh]], 20), paints.skin, [0, 0, 0]);
+    const knee = new THREE.Bone();
+    knee.position.set(0, -0.4, 0);
+    leg.add(knee);
+    addPart(knee, unitSphere, paints.skin, [0, 0, 0.002], [0.046 * thigh, 0.046 * thigh, 0.046 * thigh]);
+    addPart(knee, profileGeometry([[0, 0.046 * thigh], [-0.1, 0.052 * thigh], [-0.26, 0.035 * thigh], [-0.34, 0.03 * thigh]], 20), paints.skin, [0, 0, -0.006]);
+    addPart(knee, unitSphere, paints.skin, [0, -0.345, -0.008], [0.032, 0.03, 0.036]);
+    addPart(knee, unitSphere, paints.skin, [0, -0.37, 0.045], [0.045, 0.028, 0.105]);
+    addPart(knee, unitSphere, paints.skin, [0, -0.374, 0.11], [0.04, 0.022, 0.04]);
     if (look.bottom.kind === 'pants') {
-      addPart(leg, new THREE.CylinderGeometry(0.1 * build.thigh, 0.072, 0.72, 20), paints.bottom, [side * 0.005, -0.36, 0]);
+      addPart(leg, new THREE.CylinderGeometry(0.096 * thigh, 0.07, 0.47, 20), paints.bottom, [side * 0.005, -0.185, 0]);
+      addPart(knee, unitSphere, paints.bottom, [0, 0, 0], [0.07, 0.07, 0.07]);
+      addPart(knee, new THREE.CylinderGeometry(0.069, 0.062, 0.33, 20), paints.bottom, [0, -0.165, 0]);
     } else {
-      addPart(leg, new THREE.CylinderGeometry(0.1 * build.thigh, 0.092 * build.thigh, 0.3, 20), paints.bottom, [side * 0.005, -0.18, 0]);
+      addPart(leg, new THREE.CylinderGeometry(0.092 * thigh, 0.087 * thigh, 0.35, 20), paints.bottom, [side * 0.005, -0.125, 0]);
     }
-    legs.push({ leg, side });
+    legs.push({ leg, knee, side });
   }
-  const hipDepth = look.bottom.kind === 'pants' ? build.torsoBottom * build.depth + 0.012 : 0.15 * build.thigh;
-  addPart(body, unitSphere, paints.bottom, [0, 0.8, 0], [build.hipX, 0.12, hipDepth]);
+  addPart(body, unitSphere, paints.bottom, [0, 0.8, -0.005], [hips, 0.115, hips * build.depth]);
 
   const torso = new THREE.Bone();
   torso.position.y = 0.79;
   body.add(torso);
-  const chestDepth = build.torsoTop * build.depth;
-  const torsoGeometry = build.belly
-    ? new THREE.LatheGeometry([
-      new THREE.Vector2(build.torsoBottom, -0.27),
-      new THREE.Vector2(build.torsoBottom + build.belly * 0.7, -0.17),
-      new THREE.Vector2(build.torsoBottom + build.belly, -0.06),
-      new THREE.Vector2(build.torsoBottom + build.belly * 0.6, 0.08),
-      new THREE.Vector2(build.torsoTop + build.belly * 0.15, 0.18),
-      new THREE.Vector2(build.torsoTop, 0.27),
-    ], 28)
-    : new THREE.CylinderGeometry(build.torsoTop, build.torsoBottom, 0.54, 28);
+  const chestDepth = chest * build.depth;
+  const belly = build.belly;
+  const torsoGeometry = profileGeometry([
+    [-0.28, covered ? hips * 1.08 : hips * 0.96],
+    [-0.18, lerp(hips, waist, 0.4) + belly * 0.7],
+    [-0.07, waist + belly],
+    [0.05, lerp(waist, chest, female ? 0.75 : 0.6) + belly * 0.6],
+    [0.15, chest * (female ? 1.04 : 1) + belly * 0.15],
+    [0.22, chest * 0.99],
+    [0.26, chest * 0.97],
+    [0.29, chest * 0.86],
+    [0.315, chest * 0.6],
+    [0.34, neck * 1.25],
+  ], 32, 0.2);
   addPart(torso, torsoGeometry, paints.top, [0, 0.29, 0], [1, 1, build.depth]);
-  addPart(torso, unitSphere, paints.top, [0, 0.56, 0], [build.torsoTop, 0.07, chestDepth]);
-  if (look.top.kind === 'shirt') {
-    addPart(torso, new THREE.ConeGeometry(0.048, 0.13, 3), paints.skin, [0, 0.5, chestDepth - 0.002], [1, 1, 0.22], [0, 0, Math.PI]);
+  if (covered) {
+    addPart(torso, new THREE.TorusGeometry(hips * 1.08, 0.009, 6, 40), paints.top, [0, 0.015, 0], [1, build.depth, 1], [Math.PI / 2, 0, 0]);
   }
-  addPart(body, new THREE.CylinderGeometry(0.055, 0.062, 0.1, 18), paints.skin, [0, 1.44, 0]);
+  if (look.top.kind === 'shirt') {
+    addPart(torso, new THREE.ConeGeometry(0.048, 0.13, 3), paints.skin, [0, 0.5, chestDepth * 0.93], [1, 1, 0.22], [-0.25, 0, Math.PI]);
+  }
+  addPart(body, new THREE.CylinderGeometry(neck, neck * 1.12, 0.14, 18), paints.skin, [0, 1.44, 0.004]);
   if (look.chain || look.necklace) {
     const radius = look.chain ? 0.118 : 0.1;
     addPart(body, new THREE.TorusGeometry(radius, look.chain ? 0.0045 : 0.0022, 6, 48), paints.gold, [0, 1.405, 0.035], null, [look.chain ? -1.18 : -1.25, 0, 0]);
@@ -2282,7 +2339,7 @@ function createAvatar(look) {
   root.add(bakeSkinnedFigure(body));
   placeholder.dispose();
   if (masked) {
-    head.add(createFaceMask(look.face));
+    head.add(createFaceMask(look.face, look.skin));
   }
   root.scale.setScalar(look.scale);
 
@@ -2337,8 +2394,10 @@ function createAvatar(look) {
       body.position.y = Math.abs(Math.sin(walkPhase)) * 0.022 * weights.walk;
       head.rotation.y = Math.sin(time * 0.4 + look.phase) * 0.14 * (1 - weights.wave * 0.6) * (1 - weights.hug * 0.6);
       head.rotation.x = Math.sin(time * 0.53 + look.phase) * 0.035 - 0.04;
-      for (const { leg, side } of legs) {
-        leg.rotation.x = Math.sin(walkPhase + (side > 0 ? 0 : Math.PI)) * 0.42 * weights.walk;
+      for (const { leg, knee, side } of legs) {
+        const stride = walkPhase + (side > 0 ? 0 : Math.PI);
+        leg.rotation.x = Math.sin(stride) * 0.42 * weights.walk;
+        knee.rotation.x = (0.06 + 0.75 * Math.max(0, -Math.cos(stride))) * weights.walk;
       }
       for (const { shoulder, elbow, side } of arms) {
         const swing = -Math.sin(walkPhase + (side > 0 ? 0 : Math.PI)) * 0.36 * weights.walk;
@@ -2626,8 +2685,10 @@ const GREETING_TEXT = [GREETING.title, ...GREETING.body, GREETING.closing, GREET
 
 const BOTTLE_SCALE = 1.25;
 const BOTTLE_REST_HEIGHT = 0.045 * BOTTLE_SCALE;
-const BOTTLE_DRIFT_SECONDS = 11;
-const BOTTLE_LANDING = new THREE.Vector3(-0.6, sandHeightAt(-0.6, 3) + BOTTLE_REST_HEIGHT, 3);
+const BOTTLE_DRIFT_SPEED = 2.2;
+const BOTTLE_SWASH_PUSH = 9;
+const BOTTLE_PATIENCE_SECONDS = 8;
+const BOTTLE_LANDING = new THREE.Vector3(-0.6, sandHeightAt(-0.6, 2) + BOTTLE_REST_HEIGHT, 2);
 const SCROLL_WIDTH = 0.42;
 const SCROLL_HEIGHT = 0.56;
 const SCROLL_ROLL_RADIUS = 0.08;
@@ -2657,7 +2718,7 @@ function createGlowTexture() {
 
 /**
  * Creates the message bottle: glass, cork and rolled scroll inside, plus its glow, tap target and cork-pop puff.
- * It drifts in on the waves, lands near the avatar and opens on request.
+ * It rides the waves in, surging on each crest, until the swash strands it near the avatar, and opens on request.
  * @param {{tier: string}} quality Quality settings.
  * @returns {object} Bottle controller.
  */
@@ -2728,12 +2789,17 @@ function createBottle(quality) {
   let puffTime = Infinity;
 
   const driftPath = new THREE.CatmullRomCurve3([
-    new THREE.Vector3(-7, 0, -34),
-    new THREE.Vector3(-5, 0, -20),
-    new THREE.Vector3(-3, 0, -9),
-    new THREE.Vector3(-1.3, 0, -1.5),
+    new THREE.Vector3(-4.4, 0, -22),
+    new THREE.Vector3(-3, 0, -12),
+    new THREE.Vector3(-1.9, 0, -4.5),
+    new THREE.Vector3(-1.1, 0, -0.2),
     new THREE.Vector3(BOTTLE_LANDING.x, 0, BOTTLE_LANDING.z),
   ], false, 'catmullrom', 0.5);
+  const driftLength = driftPath.getLength();
+  const surfWave = WAVES[0];
+  const surfNumber = (Math.PI * 2) / surfWave.wavelength;
+  const surfSpeed = Math.sqrt(GRAVITY / surfNumber);
+  const orbit = { x: 0, y: 0, z: 0 };
   const landingYaw = 0.55;
   const up = new THREE.Vector3(0, 1, 0);
   const point = new THREE.Vector3();
@@ -2748,6 +2814,10 @@ function createBottle(quality) {
   let state = 'hidden';
   let stateTime = 0;
   let driftProgress = 0;
+  let driftDistance = 0;
+  let driftSpeed = 0;
+  let lastWater = null;
+  let orbitBlend = 1;
   let raise = 0;
   let snapNextFloat = true;
 
@@ -2763,22 +2833,28 @@ function createBottle(quality) {
   }
 
   /**
-   * Floats the bottle on the water at a spot, resting on the sand where the water is too shallow.
+   * Floats the bottle on the water at a spot, swinging round the wave orbit of the water there,
+   * and resting on the sand where the water is too shallow.
    * @param {THREE.Vector3} spot Position on the drift path (y ignored).
    * @param {number} time World time in seconds.
    * @param {number} dt Seconds since the last frame.
+   * @param {number} orbitWeight How much of the wave orbit to follow, 0 when grounded.
    * @returns {void}
    */
-  function floatAt(spot, time, dt) {
-    const water = waveHeightAt(spot.x, spot.z, time) - 0.012;
-    const ground = sandHeightAt(spot.x, spot.z) + BOTTLE_REST_HEIGHT;
+  function floatAt(spot, time, dt, orbitWeight) {
+    orbitBlend = snapNextFloat ? orbitWeight : damp(orbitBlend, orbitWeight, 3, dt);
+    waveDisplacement(spot.x, spot.z, time, orbit);
+    const x = lerp(spot.x, orbit.x, orbitBlend);
+    const z = lerp(spot.z, orbit.z, orbitBlend);
+    const water = waveHeightAt(x, z, time) - 0.012;
+    const ground = sandHeightAt(x, z) + BOTTLE_REST_HEIGHT;
     const floating = smoothstep(ground - 0.02, ground + 0.06, water);
     const height = Math.max(water, ground);
-    carrier.position.x = spot.x;
-    carrier.position.z = spot.z;
+    carrier.position.x = x;
+    carrier.position.z = z;
     carrier.position.y = snapNextFloat ? height : damp(carrier.position.y, height, 12, dt);
-    const slopeX = (waveHeightAt(spot.x + 0.3, spot.z, time) - waveHeightAt(spot.x - 0.3, spot.z, time)) / 0.6;
-    const slopeZ = (waveHeightAt(spot.x, spot.z + 0.3, time) - waveHeightAt(spot.x, spot.z - 0.3, time)) / 0.6;
+    const slopeX = (waveHeightAt(x + 0.3, z, time) - waveHeightAt(x - 0.3, z, time)) / 0.6;
+    const slopeZ = (waveHeightAt(x, z + 0.3, time) - waveHeightAt(x, z - 0.3, time)) / 0.6;
     surfaceNormal.set(-slopeX * floating, 1, -slopeZ * floating).normalize();
     tilt.setFromUnitVectors(up, surfaceNormal);
     yawQuaternion.setFromAxisAngle(up, landingYaw + Math.sin(time * 0.35) * 0.4 * (1 - driftProgress));
@@ -2789,6 +2865,31 @@ function createBottle(quality) {
       carrier.quaternion.slerp(targetQuaternion, 1 - Math.exp(-6 * dt));
     }
     snapNextFloat = false;
+  }
+
+  /**
+   * Carries the bottle along its path the way the sea would: a push on every passing crest offshore,
+   * then in the shallows only while visible swash covers it, running up with the rising water and sliding back a little
+   * as it drains, until it is left at the high-water line. After a while thinner swashes are enough, so it always comes ashore.
+   * @param {number} time World time in seconds.
+   * @param {number} dt Seconds since the last frame.
+   * @returns {void}
+   */
+  function drift(time, dt) {
+    driftPath.getPointAt(driftDistance / driftLength, point);
+    const water = waveHeightAt(point.x, point.z, time);
+    const shallows = smoothstep(driftLength - 6, driftLength, driftDistance);
+    const help = smoothstep(BOTTLE_PATIENCE_SECONDS, BOTTLE_PATIENCE_SECONDS + 5, stateTime);
+    const depth = water - sandHeightAt(point.x, point.z) - lerp(0.03, lerp(0.03, 0, help), shallows);
+    const afloat = smoothstep(0, 0.02, depth);
+    const rising = lastWater === null || dt <= 0 ? 0 : (water - lastWater) / dt;
+    lastWater = water;
+    const crest = Math.sin(surfNumber * (surfWave.direction.x * point.x + surfWave.direction.y * point.z - surfSpeed * time));
+    const push = BOTTLE_DRIFT_SPEED * (1 + 0.8 * crest) * (1 - shallows * 0.7) + BOTTLE_SWASH_PUSH * rising * shallows;
+    driftSpeed = lerp(driftSpeed * Math.exp(-4 * dt), damp(driftSpeed, push, 2.5, dt), afloat);
+    driftDistance = THREE.MathUtils.clamp(driftDistance + driftSpeed * dt, 0, driftLength);
+    driftProgress = driftDistance / driftLength;
+    floatAt(point, time, dt, afloat * (1 - smoothstep(driftLength - 1.5, driftLength, driftDistance)));
   }
 
   /**
@@ -2934,12 +3035,15 @@ function createBottle(quality) {
       puffMaterial.opacity = 0;
     },
     /**
-     * Starts the drift in from the sea.
+     * Starts the ride in from the sea.
      * @returns {void}
      */
     startDrift() {
       this.reset();
       driftProgress = 0;
+      driftDistance = 0;
+      driftSpeed = BOTTLE_DRIFT_SPEED;
+      lastWater = null;
       snapNextFloat = true;
       setState('drifting');
     },
@@ -3027,10 +3131,8 @@ function createBottle(quality) {
       }
       stateTime += dt;
       if (state === 'drifting') {
-        const progress = clamp01(stateTime / BOTTLE_DRIFT_SECONDS);
-        driftProgress = 1 - Math.pow(1 - progress, 1.5);
-        floatAt(driftPath.getPoint(driftProgress, point), time, dt);
-        if (progress >= 1) {
+        drift(time, dt);
+        if (driftDistance >= driftLength) {
           setState('landed');
         }
       } else if (state === 'landed') {
@@ -3522,7 +3624,6 @@ const FIREWORK_LINES = [
 const FIREWORK_TEXT_CENTER = new THREE.Vector3(0, 22, -50);
 const FIREWORK_TEXT_WIDTH = 38;
 const FIREWORK_TEXT_SEEK_SECONDS = 1.8;
-const FIREWORK_TEXT_HOLD_SECONDS = 5.5;
 const FIREWORK_SCHEDULE = [
   { at: 1.6, x: -14 }, { at: 2.4, x: 12 }, { at: 3.3, x: -4 }, { at: 4, x: 18 }, { at: 4.6, x: -20 },
   { at: 5.6, x: -8 }, { at: 5.7, x: 8 }, { at: 6.8, x: 2 }, { at: 7.6, x: -15 }, { at: 8, x: 15 },
@@ -3583,7 +3684,7 @@ function sampleNamePoints(count) {
 
 /**
  * Creates the fireworks: a fixed pool of additive point particles driven on the CPU, rockets with trails,
- * spherical bursts, a finale whose sparks settle into «Happy Birthday!!!» over «АНДРІЙ», and a flash light that lights the beach.
+ * spherical bursts, a finale whose sparks settle into «Happy Birthday!!!» over «АНДРІЙ» and stay to the end, and a flash light that lights the beach.
  * @param {{tier: string}} quality Quality settings.
  * @returns {object} Fireworks controller.
  */
@@ -3610,7 +3711,8 @@ function createFireworks(quality) {
   const active = [];
   const rockets = [];
   let textParticles = [];
-  let textClock = 0;
+  let textScale = 1;
+  const textCentre = FIREWORK_TEXT_CENTER.clone();
   let namePoints = null;
   let nextLaunch = FIREWORK_SCHEDULE.length;
   let flashLevel = 0;
@@ -3754,46 +3856,27 @@ function createFireworks(quality) {
   }
 
   /**
-   * Starts the name: sparks burst out, then spring onto points inside the letters.
+   * Starts the name: sparks burst out, then spring onto points inside the letters and stay there until the fireworks are cleared.
    * @param {THREE.Vector3} centre Burst centre, which is also the word's centre.
+   * @param {boolean} [settled] When true the sparks start already in place, for jumps past the finale.
    * @returns {void}
    */
-  function formName(centre) {
+  function formName(centre, settled = false) {
     namePoints ??= sampleNamePoints(textCount);
     textParticles = [];
-    textClock = 0;
+    textCentre.copy(centre);
     for (let i = 0; i < textCount; i += 1) {
       const roll = random();
       const color = roll < 0.12 ? FIREWORK_WHITE : roll < 0.2 ? FIREWORK_COLORS[0] : FIREWORK_COLORS[1];
-      const velocity = randomDirection().multiplyScalar(6 + random() * 8);
-      const index = spawn(centre, velocity, color, textPointSize, Infinity, PARTICLE_SEEK);
+      const target = head.set(centre.x + namePoints[i * 2] * textScale, centre.y + namePoints[i * 2 + 1] * textScale, centre.z);
+      const velocity = settled ? direction.set(0, 0, 0) : randomDirection().multiplyScalar(6 + random() * 8);
+      const index = spawn(settled ? target : centre, velocity, color, textPointSize, Infinity, settled ? PARTICLE_HOLD : PARTICLE_SEEK);
       if (index < 0) {
         break;
       }
-      targets[index * 3] = centre.x + namePoints[i * 2];
-      targets[index * 3 + 1] = centre.y + namePoints[i * 2 + 1];
-      targets[index * 3 + 2] = centre.z;
+      target.toArray(targets, index * 3);
       textParticles.push(index);
     }
-  }
-
-  /**
-   * Lets the name go: its sparks drift down and fade.
-   * @returns {void}
-   */
-  function releaseName() {
-    for (const index of textParticles) {
-      if (modes[index] !== PARTICLE_SEEK && modes[index] !== PARTICLE_HOLD) {
-        continue;
-      }
-      modes[index] = PARTICLE_SPARK;
-      ages[index] = 0;
-      lives[index] = 2.2 + random();
-      velocities[index * 3] = (random() - 0.5) * 1.2;
-      velocities[index * 3 + 1] = -0.5 - random() * 0.8;
-      velocities[index * 3 + 2] = (random() - 0.5) * 1.2;
-    }
-    textParticles = [];
   }
 
   /**
@@ -3919,6 +4002,28 @@ function createFireworks(quality) {
       nextLaunch = FIREWORK_SCHEDULE.length;
     },
     /**
+     * Sizes the name for the screen shape: a little smaller on tall phone screens so it fits their narrow view.
+     * Sparks already holding the name glide to the new size.
+     * @param {number} aspect Screen width divided by height.
+     * @returns {void}
+     */
+    setAspect(aspect) {
+      textScale = lerp(1, 0.8, clamp01((1 - aspect) / 0.5));
+      textParticles.forEach((index, i) => {
+        targets[index * 3] = textCentre.x + namePoints[i * 2] * textScale;
+        targets[index * 3 + 1] = textCentre.y + namePoints[i * 2 + 1] * textScale;
+      });
+    },
+    /**
+     * Puts the finished name in the sky at once unless it is already there, for jumps past the finale.
+     * @returns {void}
+     */
+    showName() {
+      if (textParticles.length === 0) {
+        formName(FIREWORK_TEXT_CENTER, true);
+      }
+    },
+    /**
      * Removes every rocket and particle at once.
      * @returns {void}
      */
@@ -3961,12 +4066,6 @@ function createFireworks(quality) {
       }
       updateRockets(dt);
       updateParticles(dt);
-      if (textParticles.length > 0) {
-        textClock += dt;
-        if (textClock >= FIREWORK_TEXT_SEEK_SECONDS + FIREWORK_TEXT_HOLD_SECONDS) {
-          releaseName();
-        }
-      }
       positionAttribute.needsUpdate = true;
       colorAttribute.needsUpdate = true;
       sizeAttribute.needsUpdate = true;
@@ -4056,171 +4155,6 @@ function createStars(quality) {
      */
     setPixelRatio(pixelRatio) {
       uniforms.uPixelRatio.value = pixelRatio;
-    },
-  };
-}
-
-const LANTERN_WIND = new THREE.Vector3(-0.12, 0, -0.55);
-const LANTERN_CEILING = 75;
-
-/**
- * Creates the sky lanterns of the idle loop: glowing paper lanterns that rise over the sea and recycle.
- * The first four are let go from the friends' hands; the rest drift up from along the shore.
- * @param {{tier: string}} quality Quality settings.
- * @returns {object} Lanterns controller.
- */
-function createLanterns(quality) {
-  const count = quality.tier === 'high' ? 48 : 24;
-  const random = createRandom(5150);
-  const geometry = new THREE.CylinderGeometry(0.2, 0.15, 0.42, 12, 1);
-  const phases = new Float32Array(count).map(() => random() * Math.PI * 2);
-  geometry.setAttribute('aPhase', new THREE.InstancedBufferAttribute(phases, 1));
-  const uniforms = { uTime: { value: 0 } };
-  const material = new THREE.ShaderMaterial({
-    uniforms,
-    side: THREE.DoubleSide,
-    vertexShader: `
-      attribute float aPhase;
-      uniform float uTime;
-      varying vec2 vUv;
-      varying float vFlicker;
-      void main() {
-        vUv = uv;
-        vFlicker = 0.88 + 0.12 * sin(uTime * 9.0 + aPhase) * sin(uTime * 5.3 + aPhase * 2.0);
-        gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);
-      }
-    `,
-    fragmentShader: `
-      varying vec2 vUv;
-      varying float vFlicker;
-      void main() {
-        vec3 hot = vec3(1.0, 0.6, 0.26) * 1.5;
-        vec3 paper = vec3(0.86, 0.3, 0.08) * 0.75;
-        vec3 color = mix(hot, paper, smoothstep(0.0, 1.0, vUv.y));
-        color *= 0.86 + 0.14 * abs(sin(vUv.x * 3.14159 * 6.0));
-        color *= gl_FrontFacing ? 1.0 : 1.35;
-        gl_FragColor = vec4(color * vFlicker, 1.0);
-        #include <tonemapping_fragment>
-        #include <colorspace_fragment>
-      }
-    `,
-  });
-  const mesh = new THREE.InstancedMesh(geometry, material, count);
-  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  mesh.frustumCulled = false;
-  const haloPositions = new Float32Array(count * 3);
-  const haloGeometry = new THREE.BufferGeometry();
-  haloGeometry.setAttribute('position', new THREE.BufferAttribute(haloPositions, 3).setUsage(THREE.DynamicDrawUsage));
-  const halos = new THREE.Points(haloGeometry, new THREE.PointsMaterial({
-    map: createGlowTexture(),
-    color: '#FF9F4A',
-    size: 2.4,
-    transparent: true,
-    opacity: 0.55,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-    fog: false,
-  }));
-  halos.frustumCulled = false;
-  const group = new THREE.Group();
-  group.add(mesh, halos);
-  group.visible = false;
-
-  const lanterns = Array.from({ length: count }, () => ({
-    position: new THREE.Vector3(),
-    rise: 0,
-    age: 0,
-    delay: 0,
-    sway: 0,
-    size: 1,
-  }));
-  const matrix = new THREE.Matrix4();
-  const rotation = new THREE.Quaternion();
-  const euler = new THREE.Euler();
-  const scale = new THREE.Vector3();
-
-  /**
-   * Sends a lantern up from a random spot along the shore or over the shallows.
-   * @param {object} lantern Lantern state.
-   * @param {number} delay Seconds before it lights and starts rising.
-   * @returns {void}
-   */
-  function spawnAlongShore(lantern, delay) {
-    lantern.position.set((random() - 0.5) * 80, 1.5 + random() * 2, -4 - random() * 20);
-    lantern.rise = 0.7 + random() * 0.6;
-    lantern.age = 0;
-    lantern.delay = delay;
-    lantern.sway = random() * Math.PI * 2;
-    lantern.size = 0.9 + random() * 0.5;
-  }
-
-  return {
-    object3d: group,
-    /**
-     * Lights the lanterns: the first ones leave from the given hands, the rest follow in a staggered stream.
-     * @param {Array<THREE.Vector3>} hands World points the first lanterns are let go from.
-     * @returns {void}
-     */
-    start(hands) {
-      group.visible = true;
-      lanterns.forEach((lantern, index) => {
-        if (index < hands.length) {
-          lantern.position.copy(hands[index]);
-          lantern.rise = 0.55 + index * 0.05;
-          lantern.age = 0;
-          lantern.delay = 1.2 + index * 0.7;
-          lantern.sway = index;
-          lantern.size = 1;
-        } else {
-          spawnAlongShore(lantern, 2 + (index - hands.length) * 0.9 + random() * 1.5);
-        }
-      });
-    },
-    /**
-     * Puts every lantern out.
-     * @returns {void}
-     */
-    reset() {
-      group.visible = false;
-    },
-    /**
-     * Raises and sways the lanterns, recycling those that reach the ceiling.
-     * @param {number} dt Seconds since the last frame.
-     * @param {number} time World time in seconds.
-     * @returns {void}
-     */
-    update(dt, time) {
-      if (!group.visible) {
-        return;
-      }
-      uniforms.uTime.value = time;
-      lanterns.forEach((lantern, index) => {
-        if (lantern.delay > 0) {
-          lantern.delay -= dt;
-          scale.setScalar(0);
-          matrix.compose(lantern.position, rotation.identity(), scale);
-          mesh.setMatrixAt(index, matrix);
-          haloPositions[index * 3 + 1] = -1000;
-          return;
-        }
-        lantern.age += dt;
-        const climb = smoothstep(0, 3, lantern.age);
-        lantern.position.y += lantern.rise * climb * dt;
-        lantern.position.addScaledVector(LANTERN_WIND, climb * smoothstep(0, 12, lantern.age) * dt);
-        lantern.position.x += Math.sin(time * 0.5 + lantern.sway) * 0.12 * dt;
-        if (lantern.position.y > LANTERN_CEILING) {
-          spawnAlongShore(lantern, random() * 4);
-        }
-        euler.set(Math.sin(time * 0.9 + lantern.sway) * 0.07, 0, Math.cos(time * 0.7 + lantern.sway) * 0.07);
-        scale.setScalar(lantern.size * smoothstep(0, 1.2, lantern.age));
-        matrix.compose(lantern.position, rotation.setFromEuler(euler), scale);
-        mesh.setMatrixAt(index, matrix);
-        haloPositions[index * 3] = lantern.position.x;
-        haloPositions[index * 3 + 1] = lantern.position.y - 0.05;
-        haloPositions[index * 3 + 2] = lantern.position.z;
-      });
-      mesh.instanceMatrix.needsUpdate = true;
-      haloGeometry.attributes.position.needsUpdate = true;
     },
   };
 }
@@ -5094,7 +5028,7 @@ function createCameraRig(camera, reducedMotion) {
       camera.lookAt(smoothedLook);
     },
     /**
-     * Eases from the portrait into the night shot, the group below and the lanterns above the sea,
+     * Eases from the portrait into the night shot, the group below and the glowing name above the sea,
      * then lets the visitor look around: the view turns about the group and tilts between them and the sky.
      * @param {number} beatTime Seconds into the idle beat.
      * @param {number} time World time in seconds.
@@ -5136,12 +5070,8 @@ function createCameraRig(camera, reducedMotion) {
  * @param {object} cast Scene parts and controllers the beats use.
  * @returns {Array<object>} Beats for the timeline.
  */
-function createBeats({ ui, audio, rig, clock, avatar, friends, bottle, scroll, fireworks, polaroid, lanterns, timeline, reducedMotion }) {
+function createBeats({ ui, audio, rig, clock, avatar, friends, bottle, scroll, fireworks, polaroid, timeline, reducedMotion }) {
   const lookAround = { yaw: 0, pitch: 0, targetYaw: 0, targetPitch: 0, idleFor: 0 };
-  const lanternHands = [
-    AVATAR_SPOT.clone().add(new THREE.Vector3(0.05, 2.05, -0.35)),
-    ...FRIEND_CAST.map((cast) => new THREE.Vector3(cast.line[0] + 0.05, sandHeightAt(cast.line[0], cast.line[1]) + 1.95, cast.line[1] - 0.35)),
-  ];
   const neckPosition = new THREE.Vector3();
   const neckQuaternion = new THREE.Quaternion();
   let bottleHintShown = false;
@@ -5443,6 +5373,7 @@ function createBeats({ ui, audio, rig, clock, avatar, friends, bottle, scroll, f
       enter() {
         settleProps();
         fireworks.stopLaunching();
+        fireworks.showName();
         polaroid.drop();
         shutterPlayed = false;
         if (!friends.visible) {
@@ -5470,7 +5401,7 @@ function createBeats({ ui, audio, rig, clock, avatar, friends, bottle, scroll, f
     {
       ...BEATS[7],
       /**
-       * Keeps the reveal in place (after a jump, snaps straight to it) and lets the lanterns go.
+       * Keeps the reveal in place (after a jump, snaps straight to it) with the name still glowing over the sea.
        * @returns {void}
        */
       enter() {
@@ -5489,11 +5420,11 @@ function createBeats({ ui, audio, rig, clock, avatar, friends, bottle, scroll, f
           avatar.snapPose();
         }
         Object.assign(lookAround, { yaw: 0, pitch: 0, targetYaw: 0, targetPitch: 0, idleFor: 0 });
-        lanterns.start(lanternHands);
+        fireworks.showName();
         replayShown = false;
         nextIdleMelody = 3;
         audio.setSurf(0.75, 3);
-        ui.announce('Над морем повільно здіймаються небесні ліхтарики. Можна роззирнутися, потягнувши екран.');
+        ui.announce('Над морем світиться напис Happy Birthday!!! АНДРІЙ. Можна роззирнутися, потягнувши екран.');
       },
       /**
        * Settles into the night shot and follows the visitor's look-around, drifting gently when left alone.
@@ -5504,7 +5435,8 @@ function createBeats({ ui, audio, rig, clock, avatar, friends, bottle, scroll, f
       update(beatTime, dt) {
         lookAround.idleFor += dt;
         if (!reducedMotion && lookAround.idleFor > 8) {
-          lookAround.targetYaw = damp(lookAround.targetYaw, Math.sin(clock.time * 0.07) * 0.3, 0.4, dt);
+          const room = clamp01((innerWidth / innerHeight - 0.5) / 0.5);
+          lookAround.targetYaw = damp(lookAround.targetYaw, Math.sin(clock.time * 0.07) * 0.12 * room, 0.4, dt);
           lookAround.targetPitch = damp(lookAround.targetPitch, 0, 0.4, dt);
         }
         lookAround.yaw = damp(lookAround.yaw, lookAround.targetYaw, 4, dt);
@@ -5531,11 +5463,10 @@ function createBeats({ ui, audio, rig, clock, avatar, friends, bottle, scroll, f
         lookAround.targetPitch = THREE.MathUtils.clamp(lookAround.targetPitch + dy * 0.003, -0.15, 0.35);
       },
       /**
-       * Puts the lanterns out, hides the replay button and stops the tune when leaving the idle loop.
+       * Hides the replay button and stops the tune when leaving the idle loop.
        * @returns {void}
        */
       exit() {
-        lanterns.reset();
         ui.hideReplay();
         audio.stopMusic();
       },
@@ -5572,18 +5503,18 @@ async function main() {
   const fireworks = createFireworks(quality.reducedMotion ? { ...quality, tier: 'low' } : quality);
   const polaroid = createPolaroid();
   const stars = createStars(quality);
-  const lanterns = createLanterns(quality);
-  scene.add(sky.object3d, lighting.object3d, beach.object3d, shore.object3d, ocean.object3d, avatar.object3d, friends.object3d, bottle.object3d, scroll.object3d, fireworks.object3d, polaroid.object3d, stars.object3d, lanterns.object3d);
+  scene.add(sky.object3d, lighting.object3d, beach.object3d, shore.object3d, ocean.object3d, avatar.object3d, friends.object3d, bottle.object3d, scroll.object3d, fireworks.object3d, polaroid.object3d, stars.object3d);
   scene.environment = sky.texture;
 
   const sampleAtmosphere = createAtmosphereSampler();
   const rig = createCameraRig(camera, quality.reducedMotion);
   rig.setAspect(camera.aspect);
+  fireworks.setAspect(camera.aspect);
   const guard = createPerformanceGuard(renderer, quality, () => stars.setPixelRatio(quality.pixelRatio));
   const clock = { time: 0 };
   const beats = [];
   const timeline = createTimeline(beats);
-  beats.push(...createBeats({ ui, audio, rig, clock, avatar, friends, bottle, scroll, fireworks, polaroid, lanterns, timeline, reducedMotion: quality.reducedMotion }));
+  beats.push(...createBeats({ ui, audio, rig, clock, avatar, friends, bottle, scroll, fireworks, polaroid, timeline, reducedMotion: quality.reducedMotion }));
 
   fireworks.setSoundHandler((type, value) => {
     if (type === 'launch') {
@@ -5616,6 +5547,7 @@ async function main() {
     renderer.setSize(innerWidth, innerHeight);
     fitCamera(camera);
     rig.setAspect(camera.aspect);
+    fireworks.setAspect(camera.aspect);
   });
 
   const frameClock = new THREE.Clock();
@@ -5663,7 +5595,6 @@ async function main() {
     friends.update(dt, clock.time);
     bottle.update(dt, clock.time);
     polaroid.update(dt);
-    lanterns.update(dt, clock.time);
     controls?.update();
     scroll.update(dt, camera);
     fireworks.update(dt, camera, renderer);
@@ -5715,7 +5646,7 @@ async function main() {
   }
 
   if (params.debug) {
-    window.birthday = { THREE, scene, camera, renderer, audio, avatar, friends, bottle, scroll, fireworks, polaroid, stars, lanterns, timeline, rig, controls, sky, frame, advance, waveHeightAt, sandHeightAt, AVATAR_SPOT };
+    window.birthday = { THREE, scene, camera, renderer, audio, avatar, friends, bottle, scroll, fireworks, polaroid, stars, timeline, rig, controls, sky, frame, advance, waveHeightAt, sandHeightAt, AVATAR_SPOT };
   }
 }
 
